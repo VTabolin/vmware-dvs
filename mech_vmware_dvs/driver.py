@@ -42,13 +42,13 @@ class VMwareDVSMechanismDriver(driver_api.MechanismDriver):
     def initialize(self):
         self.network_map = util.create_network_map_from_config(CONF.ml2_vmware)
 
-        listener = oslo_messaging.get_notification_listener(
-            n_rpc.TRANSPORT,
-            targets=[oslo_messaging.Target(topic='vmware_dvs')],
-            endpoints=[endpoints.SecurityGroupRuleCreateEndPoint(self),
-                       endpoints.SecurityGroupRuleDeleteEndPoint(self)],
-            executor='eventlet')
-        listener.start()
+        # listener = oslo_messaging.get_notification_listener(
+        #     n_rpc.TRANSPORT,
+        #     targets=[oslo_messaging.Target(topic='vmware_dvs')],
+        #     endpoints=[endpoints.SecurityGroupRuleCreateEndPoint(self),
+        #                endpoints.SecurityGroupRuleDeleteEndPoint(self)],
+        #     executor='eventlet')
+        # listener.start()
 
     @util.wrap_retry
     def create_network_precommit(self, context):
@@ -159,6 +159,7 @@ class VMwareDVSMechanismDriver(driver_api.MechanismDriver):
 
     @util.wrap_retry
     def _update_security_groups(self, dvs, context, force):
+        return
         if not dvs:
             return
         current_sg = set(context.current['security_groups'])

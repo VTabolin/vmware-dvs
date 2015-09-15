@@ -204,15 +204,15 @@ class DVSController(object):
         port_setting.blocked = builder.blocked(blocked)
 
         # block all traffic by default
-        rule = builder.factory.create('ns0:DvsTrafficRule')
-        rule.sequence = 10
-        rule.action = builder.factory.create(
-            'ns0:DvsDropNetworkRuleAction')
-        rule.direction = 'both'
-        rule.qualifier = [builder.factory.create(
-            'ns0:DvsIpNetworkRuleQualifier'
-        )]
-        port_setting.filterPolicy = builder.filter_policy([rule])
+        # rule = builder.factory.create('ns0:DvsTrafficRule')
+        # rule.sequence = 10
+        # rule.action = builder.factory.create(
+        #     'ns0:DvsDropNetworkRuleAction')
+        # rule.direction = 'both'
+        # rule.qualifier = [builder.factory.create(
+        #     'ns0:DvsIpNetworkRuleQualifier'
+        # )]
+        # port_setting.filterPolicy = builder.filter_policy([rule])
 
         pg = builder.pg_config(port_setting)
         pg.name = name
