@@ -23,7 +23,7 @@ from oslo.vmware import api
 from oslo.vmware import exceptions as vmware_exceptions
 from oslo.vmware import vim_util
 
-from neutron.openstack.common.gettextutils import _LI
+from neutron.openstack.common.gettextutils import _LI, _
 
 from mech_vmware_dvs import exceptions
 
@@ -51,55 +51,6 @@ LOGIN_PROBLEM_TEXT = "Cannot complete login due to an incorrect "\
 
 DELETED_TEXT = "The object has already been deleted or has not been "\
                "completely created"
-from copy import deepcopy
-
-BACKWARD={'port_range_min':'source_port_range_min','port_range_max':'source_port_range_max', 'source_port_range_min':'port_range_min', 'source_port_range_max':'port_range_max'}
-
-def change_portrange_for_egress(rules):
-    r_rules=[]
-    for rule in rules:
-        r_={}
-        if rule['direction']=='egress':
-            for key in rule:
-                if key in BACKWARD:
-                    r_[BACKWARD[key]]=rule[key]
-                else:
-                    r_[key]=rule[key]
-            r_rules.append(r_)
-        else:
-            r_rules.append(rule)
-    return r_rules
-
-def reverse_rules(rules):
-    r_rules=[]
-    for rule in rules:
-        r_rules.append(rule)
-        r_=deepcopy(rule)
-        if r_['direction']=='egress':
-            r_['direction']='ingress'
-        else:
-            r_['direction']='egress'
-        if 'dest_ip_prefix' in rule:
-            r_['source_ip_prefix']=rule['dest_ip_prefix']
-        else:
-            if 'source_ip_prefix' in r_:
-                del r_['source_ip_prefix']
-        if 'source_ip_prefix' in rule:
-            r_['dest_ip_prefix']=rule['source_ip_prefix']
-        else:
-            if 'dest_ip_prefix' in r_:
-                del r_['dest_ip_prefix']
-        r_rules.append(r_)
-    return r_rules
-
-def init_rules():
-    r_rules=[{'dest_ip_prefix': u'169.254.169.254/32', 'direction': 'egress', 'protocol': 'tcp', 
-                    'ethertype': 'IPv4', 'port_range_max': 80, 'port_range_min': 80, 
-                    'source_port_range_min': 32768, 'source_port_range_max': 65535}]
-    r_rules.append({'direction': 'egress', 'protocol': 'udp',
-                    'ethertype': 'IPv4', 'port_range_max': 53, 'port_range_min': 53,
-                    'source_port_range_min': 32768, 'source_port_range_max': 65535})       
-    return r_rules
 
 
 class DVSController(object):
@@ -478,19 +429,31 @@ class SpecBuilder(object):
 
     def port_config(self, port_key, sg_rules):
         rules = []
+        reversed_rules = []
         seq = 0
         for rule_info in sg_rules:
             if 'ip_set' in rule_info:
-                for ip in rule_info['ip_set']:
-                    rules.append(self._create_rule(rule_info, seq, ip))
+                pass
+                '''for ip in rule_info['ip_set']:
+                    rule = self._create_rule(rule_info, ip,
+                                             name='remote security group')
+                    rules.append(rule.build(seq))
                     seq += 10
+                    reversed_rules.append(rule.reverse())'''
             else:
-                rules.append(self._create_rule(rule_info, seq))
+                rule = self._create_rule(rule_info, name='regural')
+                rules.append(rule.build(seq))
                 seq += 10
+                reversed_rules.append(rule.reverse())
+
+        for r in reversed_rules:
+            rules.append(r.build(seq))
+            seq += 10
 
         for i, protocol in enumerate(PROTOCOL.values()):
-            rules.append(DropAllRule(self.factory, None,
-                                     protocol, seq + i * 10).build())
+            rules.append(
+                DropAllRule(self.factory, None, protocol,
+                            name='drop all').build(seq + i * 10))
 
         filter_policy = self.filter_policy(rules)
         setting = self.port_setting()
@@ -502,34 +465,28 @@ class SpecBuilder(object):
         spec.key = port_key
         return spec
 
-    def _create_rule(self, rule_info, sequence, ip=None):
+    def _create_rule(self, rule_info, ip=None, name=None):
         rule_params = {
             'spec_factory': self.factory,
             'ethertype': rule_info['ethertype'],
             'protocol': rule_info.get('protocol'),
-            'sequence': sequence
+            'name': name
         }
         if rule_info['direction'] == 'ingress':
             rule = IngressRule(**rule_params)
-            rule.source_port_range(
-                rule_info.get('source_port_range_min'),
-                rule_info.get('source_port_range_max')
-            )
             cidr = rule_info.get('source_ip_prefix')
-            bcidr = rule_info.get('dest_ip_prefix')
         else:
             rule = EgressRule(**rule_params)
-            rule.dest_port_range(
-                rule_info.get('source_port_range_min'),
-                rule_info.get('source_port_range_max')
-            )
             cidr = rule_info.get('dest_ip_prefix')
-            bcidr = rule_info.get('source_ip_prefix')
-        rule.port_range(rule_info.get('port_range_min'),
-                        rule_info.get('port_range_max'))
-        rule.cidr(ip or cidr)
-        rule.bcidr(ip or bcidr)
-        return rule.build()
+        rule.cidr = ip or cidr
+
+        if rule_info.get('protocol') in ('tcp', 'udp'):
+            rule.port_range = (rule_info.get('port_range_min'),
+                               rule_info.get('port_range_max'))
+            rule.backward_port_range = (
+                    rule_info.get('source_port_range_min') or 32768,
+                    rule_info.get('source_port_range_max') or 65535)
+        return rule
 
     def port_criteria(self, port_key=None, port_group_key=None):
         criteria = self.factory.create(
@@ -563,18 +520,21 @@ class SpecBuilder(object):
 @six.add_metaclass(abc.ABCMeta)
 class TrafficRuleBuilder(object):
     action = 'ns0:DvsAcceptNetworkRuleAction'
+    direction = 'both'
+    reverse_class = None
+    _backward_port_range = (None, None)
+    _port_range = (None, None)
 
-    def __init__(self, spec_factory, ethertype, protocol, sequence):
+    def __init__(self, spec_factory, ethertype, protocol, name=None):
         self.factory = spec_factory
 
         self.rule = self.factory.create('ns0:DvsTrafficRule')
-        self.rule.sequence = sequence
         self.rule.action = self.factory.create(self.action)
-        self.rule.direction = 'both'
 
         self.ip_qualifier = self.factory.create(
             'ns0:DvsIpNetworkRuleQualifier'
         )
+        self.ethertype = ethertype
         if ethertype:
             any_ip = '0.0.0.0/0' if ethertype == 'IPv4' else '::/0'
             self.ip_qualifier.sourceAddress = self._cidr_spec(any_ip)
@@ -587,25 +547,46 @@ class TrafficRuleBuilder(object):
             int_exp.negate = 'false'
             self.ip_qualifier.protocol = int_exp
 
-    def build(self):
+        self.name = name
+
+    def reverse(self):
+        """Returns reversed rule"""
+        name = 'reversed' + ' ' + (self.name or '')
+        rule = self.reverse_class(self.factory, self.ethertype,
+                                  self.protocol, name=name.strip())
+        rule.cidr = self.cidr
+        rule.port_range = self.backward_port_range
+        rule.backward_port_range = self.port_range
+        return rule
+
+    def build(self, sequence):
         self.rule.qualifier = [self.ip_qualifier]
+        self.rule.direction = self.direction
+        self.rule.sequence = sequence
+        self.name = str(sequence) + '. ' + (self.name or '')
+        self.name = self.name.strip()
+        self.rule.description = self.name.strip()
         return self.rule
 
-    @abc.abstractmethod
-    def port_range(self, start, end):
-        pass
+    @property
+    def port_range(self):
+        return self._port_range
 
-    @abc.abstractmethod
-    def cidr(self, cidr):
-        pass
+    @property
+    def backward_port_range(self):
+        return self._backward_port_range
 
-    def _port_range_spec(self, start, end):
-        if start == end:
+    @property
+    def cidr(self):
+        return self._cidr
+
+    def _port_range_spec(self, begin, end):
+        if begin == end:
             result = self.factory.create('ns0:DvsSingleIpPort')
-            result.portNumber = start
+            result.portNumber = begin
         else:
             result = self.factory.create('ns0:DvsIpPortRange')
-            result.startPortNumber = start
+            result.startPortNumber = begin
             result.endPortNumber = end
         return result
 
@@ -634,61 +615,64 @@ class TrafficRuleBuilder(object):
 
 
 class IngressRule(TrafficRuleBuilder):
+    direction = 'incomingPackets'
 
-    def __init__(self, spec_factory, ethertype, protocol, sequence):
-        super(IngressRule, self).__init__(spec_factory, ethertype, protocol, sequence)
-        self.rule.direction = 'incomingPackets'
+    def __init__(self, spec_factory, ethertype, protocol, name=None):
+        super(IngressRule, self).__init__(
+            spec_factory, ethertype, protocol, name)
+        self.reverse_class = EgressRule
 
-    def port_range(self, start, end):
-        if self._has_port(start):
-            self.ip_qualifier.destinationIpPort = self._port_range_spec(start,
+    @TrafficRuleBuilder.port_range.setter
+    def port_range(self, range_):
+        begin, end = self._port_range = range_
+        if begin:
+            self.ip_qualifier.destinationIpPort = self._port_range_spec(begin,
                                                                         end)
 
-    def source_port_range(self, start, end):
-        if start:
-            self.ip_qualifier.sourceIpPort = self._port_range_spec(start, end)
+    @TrafficRuleBuilder.backward_port_range.setter
+    def backward_port_range(self, range_):
+        begin, end = self._backward_port_range = range_
+        if begin:
+            self.ip_qualifier.sourceIpPort = self._port_range_spec(begin, end)
 
+    @TrafficRuleBuilder.cidr.setter
     def cidr(self, cidr):
+        self._cidr = cidr
         if cidr:
             self.ip_qualifier.sourceAddress = self._cidr_spec(cidr)
 
-    def bcidr(self, cidr):
-        if cidr:
-            self.ip_qualifier.destinationAddress = self._cidr_spec(cidr)
 
 class EgressRule(TrafficRuleBuilder):
+    direction = 'outgoingPackets'
 
-    def __init__(self, spec_factory, ethertype, protocol, sequence):
-        super(EgressRule, self).__init__(spec_factory, ethertype, protocol, sequence)
-        self.rule.direction = 'outgoingPackets'
+    def __init__(self, spec_factory, ethertype, protocol, name=None):
+        super(EgressRule, self).__init__(
+            spec_factory, ethertype, protocol, name)
+        self.reverse_class = IngressRule
 
-    def port_range(self, start, end):
-        if self._has_port(start):
-            self.ip_qualifier.sourceIpPort = self._port_range_spec(start, end)
+    @TrafficRuleBuilder.port_range.setter
+    def port_range(self, range_):
+        begin, end = self._port_range = range_
+        if begin:
+            self.ip_qualifier.destinationIpPort = self._port_range_spec(
+                begin, end)
 
-    def dest_port_range(self, start, end):
-        if start:
-            self.ip_qualifier.destinationIpPort = self._port_range_spec(start, end)
+    @TrafficRuleBuilder.backward_port_range.setter
+    def backward_port_range(self, range_):
+        begin, end = self._backward_port_range = range_
+        if begin:
+            self.ip_qualifier.sourceIpPort = self._port_range_spec(
+                begin, end)
 
+    @TrafficRuleBuilder.cidr.setter
     def cidr(self, cidr):
+        self._cidr = cidr
         if cidr:
             self.ip_qualifier.destinationAddress = self._cidr_spec(cidr)
 
-    def bcidr(self, cidr):
-        if cidr:
-            self.ip_qualifier.sourceAddress = self._cidr_spec(cidr)
 
 class DropAllRule(TrafficRuleBuilder):
     action = 'ns0:DvsDropNetworkRuleAction'
-
-    def port_range(self, start, end):
-        pass
-
-    def dest_port_range(self, start, end):
-        pass
-
-    def cidr(self, cidr):
-        pass
 
 
 def create_network_map_from_config(config):
