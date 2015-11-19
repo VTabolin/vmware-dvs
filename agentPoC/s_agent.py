@@ -1,4 +1,6 @@
 import sys
+import signal
+import time
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -12,6 +14,10 @@ from neutron.agent import securitygroups_rpc as sg_rpc
 from neutron.agent.linux import ip_lib
 from neutron.agent.common import config as agent_conf
 from neutron.common import constants as q_const
+from neutron.common import topics
+from neutron.agent import rpc as agent_rpc
+from neutron.agent.common import polling
+#from neutron import context
 
 LOG = logging.getLogger(__name__)
 cfg.CONF.import_group('AGENT', 'vmware_conf')
@@ -66,10 +72,78 @@ class SimpleAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
             'start_flag': True}
         print self.agent_state
 
-        # Security group agent support
+        self.setup_rpc()
+        self.polling_interval = polling_interval
+        self.minimize_polling = minimize_polling
+        print 'Ok'
+        '''# Security group agent support
         self.sg_agent = sg_rpc.SecurityGroupAgentRpc(self.context,
                 self.sg_plugin_rpc, self.local_vlan_map,
-                defer_refresh_firewall=True)
+                defer_refresh_firewall=True)'''
+        self.run_daemon_loop = True
+        self.iter_num = 0
+        self.fullsync = True
+
+    def setup_rpc(self):
+        self.agent_id = 'dvs-agent-%s' % cfg.CONF.host
+        self.topic = topics.AGENT
+        # self.plugin_rpc = OVSPluginApi(topics.PLUGIN)
+        # self.sg_plugin_rpc = sg_rpc.SecurityGroupServerRpcApi(topics.PLUGIN)
+        self.state_rpc = agent_rpc.PluginReportStateAPI(topics.REPORTS)
+
+        # RPC network init
+        # self.context = context.get_admin_context_without_session()
+        # Handle updates from service
+        self.endpoints = [self]
+        # Define the listening consumers for the agent
+        consumers = [[topics.PORT, topics.UPDATE],
+                     [topics.PORT, topics.DELETE],
+                     [topics.NETWORK, topics.DELETE],
+                     [topics.SECURITY_GROUP, topics.UPDATE]]
+        self.connection = agent_rpc.create_consumers(self.endpoints,
+                                                     self.topic,
+                                                     consumers,
+                                                     start_listening=False)
+
+    def _handle_sigterm(self, signum, frame):
+        LOG.debug("Agent caught SIGTERM, quitting daemon loop.")
+        self.run_daemon_loop = False
+
+    def daemon_loop(self):
+        with polling.get_polling_manager(
+            self.minimize_polling) as pm:
+            print self.minimize_polling
+            self.rpc_loop(polling_manager=pm)
+
+    def rpc_loop(self, polling_manager=None):
+        if not polling_manager:
+            polling_manager = polling.get_polling_manager(
+                minimize_polling=False)
+        while self.run_daemon_loop:
+            start = time.time()
+            self.loop_count_and_wait(start)
+            if self.fullsync:
+                LOG.info(_LI("Agent out of sync with plugin!"))
+                self.fullsync = False
+                polling_manager.force_polling()
+
+
+    def loop_count_and_wait(self, start_time):
+        # sleep till end of polling interval
+        elapsed = time.time() - start_time
+        LOG.debug("Agent rpc_loop - iteration:%(iter_num)d "
+                  "completed. Elapsed:%(elapsed).3f",
+                  {'iter_num': self.iter_num,
+                   'elapsed': elapsed})
+        if elapsed < self.polling_interval:
+            time.sleep(self.polling_interval - elapsed)
+        else:
+            LOG.debug("Loop iteration exceeded interval "
+                      "(%(polling_interval)s vs. %(elapsed)s)!",
+                      {'polling_interval': self.polling_interval,
+                       'elapsed': elapsed})
+        self.iter_num = self.iter_num + 1
+
 
 def main():
 
@@ -91,8 +165,8 @@ def main():
         LOG.error(_LE("%s Agent terminated!"), e)
         sys.exit(1)
     print 'Ok'
-    '''signal.signal(signal.SIGTERM, agent._handle_sigterm)
+    signal.signal(signal.SIGTERM, agent._handle_sigterm)
 
     # Start everything.
     LOG.info(_LI("Agent initialized successfully, now running... "))
-    agent.daemon_loop()'''
+    agent.daemon_loop()
