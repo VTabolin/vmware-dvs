@@ -5,7 +5,7 @@ import time
 from oslo_config import cfg
 from oslo_log import log as logging
 #import oslo_messaging
-from six import moves
+#from six import moves
 
 from neutron.common import utils
 from neutron.common import config as common_config
@@ -17,33 +17,14 @@ from neutron.common import constants as q_const
 from neutron.common import topics
 from neutron.agent import rpc as agent_rpc
 from neutron.agent.common import polling
-#from neutron import context
+from neutron.openstack.common import loopingcall
+from neutron import context
 
 LOG = logging.getLogger(__name__)
-cfg.CONF.import_group('AGENT', 'vmware_conf')
+cfg.CONF.import_group('AGENT', 'neutron.plugins.dvs.agent.vmware_conf')
 
-def create_agent_config_map(config):
-    """Create a map of agent config parameters.
-
-    :param config: an instance of cfg.CONF
-    :returns: a map of agent configuration parameters
-    """
-    try:
-        bridge_mappings = utils.parse_mappings(config.ML2_VMWARE.network_maps)
-    except ValueError as e:
-        raise ValueError(_("Parsing network_maps failed: %s.") % e)
-
-    kwargs = dict(
-        vsphere_hostname=config.ML2_VMWARE.vsphere_hostname,
-        vsphere_login=config.ML2_VMWARE.vsphere_login,
-        vsphere_password=config.ML2_VMWARE.vsphere_password,
-        bridge_mappings=bridge_mappings,
-        polling_interval=config.AGENT.polling_interval,
-        minimize_polling=config.AGENT.minimize_polling,
-        veth_mtu=config.AGENT.veth_mtu,
-        quitting_rpc_timeout=config.AGENT.quitting_rpc_timeout,
-    )
-    return kwargs
+class DVSPluginApi(agent_rpc.PluginApi):
+    pass
 
 class SimpleAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
 
@@ -56,13 +37,13 @@ class SimpleAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
                  quitting_rpc_timeout=None):
         super(SimpleAgent, self).__init__()
         self.veth_mtu = veth_mtu
-        self.available_local_vlans = set(moves.xrange(q_const.MIN_VLAN_TAG,
-                                                      q_const.MAX_VLAN_TAG))
+        #self.available_local_vlans = set(moves.xrange(q_const.MIN_VLAN_TAG,
+        #                                              q_const.MAX_VLAN_TAG))
         # TODO(ethuleau): Change ARP responder so it's not dependent on the
         #                 ML2 l2 population mechanism driver.
         self.agent_state = {
             'binary': 'neutron-dvs-agent',
-            'host': cfg.CONF.host,
+            'host': 'rr',
             'topic': q_const.L2_AGENT_TOPIC,
             'configurations': {'bridge_mappings': bridge_mappings,
                                'vsphere_hostname': vsphere_hostname,
@@ -73,6 +54,12 @@ class SimpleAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
         print self.agent_state
 
         self.setup_rpc()
+        report_interval = cfg.CONF.AGENT.report_interval
+        if report_interval:
+            heartbeat = loopingcall.FixedIntervalLoopingCall(
+                self._report_state)
+            heartbeat.start(interval=report_interval)
+
         self.polling_interval = polling_interval
         self.minimize_polling = minimize_polling
         print 'Ok'
@@ -83,16 +70,37 @@ class SimpleAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
         self.run_daemon_loop = True
         self.iter_num = 0
         self.fullsync = True
+        # The initialization is complete; we can start receiving messages
+        self.connection.consume_in_threads()
+
+        self.quitting_rpc_timeout = quitting_rpc_timeout
+
+    def _report_state(self):
+        # How many devices are likely used by a VM
+        #self.agent_state.get('configurations')['devices'] = (
+        #    self.int_br_device_count)
+
+        try:
+            agent_status = self.state_rpc.report_state(self.context,
+                                                       self.agent_state,
+                                                       True)
+            if agent_status == q_const.AGENT_REVIVED:
+                LOG.info(_LI('Agent has just revived. Do a full sync.'))
+                self.fullsync = True
+            self.agent_state.pop('start_flag', None)
+        except Exception:
+            LOG.exception(_LE("Failed reporting state!"))
 
     def setup_rpc(self):
         self.agent_id = 'dvs-agent-%s' % cfg.CONF.host
         self.topic = topics.AGENT
+        self.plugin_rpc = DVSPluginApi(topics.PLUGIN)
         # self.plugin_rpc = OVSPluginApi(topics.PLUGIN)
         # self.sg_plugin_rpc = sg_rpc.SecurityGroupServerRpcApi(topics.PLUGIN)
         self.state_rpc = agent_rpc.PluginReportStateAPI(topics.REPORTS)
 
         # RPC network init
-        # self.context = context.get_admin_context_without_session()
+        self.context = context.get_admin_context_without_session()
         # Handle updates from service
         self.endpoints = [self]
         # Define the listening consumers for the agent
@@ -127,7 +135,6 @@ class SimpleAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
                 self.fullsync = False
                 polling_manager.force_polling()
 
-
     def loop_count_and_wait(self, start_time):
         # sleep till end of polling interval
         elapsed = time.time() - start_time
@@ -143,6 +150,29 @@ class SimpleAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
                       {'polling_interval': self.polling_interval,
                        'elapsed': elapsed})
         self.iter_num = self.iter_num + 1
+
+def create_agent_config_map(config):
+    """Create a map of agent config parameters.
+
+    :param config: an instance of cfg.CONF
+    :returns: a map of agent configuration parameters
+    """
+    try:
+        bridge_mappings = utils.parse_mappings(config.ML2_VMWARE.network_maps)
+    except ValueError as e:
+        raise ValueError(_("Parsing network_maps failed: %s.") % e)
+
+    kwargs = dict(
+        vsphere_hostname=config.ML2_VMWARE.vsphere_hostname,
+        vsphere_login=config.ML2_VMWARE.vsphere_login,
+        vsphere_password=config.ML2_VMWARE.vsphere_password,
+        bridge_mappings=bridge_mappings,
+        polling_interval=config.AGENT.polling_interval,
+        minimize_polling=config.AGENT.minimize_polling,
+        veth_mtu=config.AGENT.veth_mtu,
+        quitting_rpc_timeout=config.AGENT.quitting_rpc_timeout,
+    )
+    return kwargs
 
 
 def main():
@@ -170,3 +200,6 @@ def main():
     # Start everything.
     LOG.info(_LI("Agent initialized successfully, now running... "))
     agent.daemon_loop()
+
+if __name__ == "__main__":
+    main()
