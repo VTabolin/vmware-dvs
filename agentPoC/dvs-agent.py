@@ -26,7 +26,7 @@ cfg.CONF.import_group('AGENT', 'neutron.plugins.dvs.agent.vmware_conf')
 class DVSPluginApi(agent_rpc.PluginApi):
     pass
 
-class SimpleAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
+class DVSAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
 
 #    target = oslo_messaging.Target(version='1.2')
 
@@ -35,7 +35,7 @@ class SimpleAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
                  veth_mtu=None,
                  minimize_polling=False,
                  quitting_rpc_timeout=None):
-        super(SimpleAgent, self).__init__()
+        super(DVSAgent, self).__init__()
         self.veth_mtu = veth_mtu
         #self.available_local_vlans = set(moves.xrange(q_const.MIN_VLAN_TAG,
         #                                              q_const.MAX_VLAN_TAG))
@@ -62,10 +62,9 @@ class SimpleAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
         self.polling_interval = polling_interval
         self.minimize_polling = minimize_polling
         # Security group agent support
-        '''self.sg_agent = sg_rpc.SecurityGroupAgentRpc(self.context,
-                self.sg_plugin_rpc, self.local_vlan_map,
-                defer_refresh_firewall=True)
-        print "SG_agent enabled"'''
+        self.sg_agent = sg_rpc.SecurityGroupAgentRpc(self.context,
+                self.sg_plugin_rpc, defer_refresh_firewall=True)
+        print "SG_agent enabled"
         self.run_daemon_loop = True
         self.iter_num = 0
         self.fullsync = True
@@ -94,8 +93,7 @@ class SimpleAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
         self.agent_id = 'dvs-agent-%s' % cfg.CONF.host
         self.topic = topics.AGENT
         self.plugin_rpc = DVSPluginApi(topics.PLUGIN)
-        # self.plugin_rpc = OVSPluginApi(topics.PLUGIN)
-        # self.sg_plugin_rpc = sg_rpc.SecurityGroupServerRpcApi(topics.PLUGIN)
+        self.sg_plugin_rpc = sg_rpc.SecurityGroupServerRpcApi(topics.PLUGIN)
         self.state_rpc = agent_rpc.PluginReportStateAPI(topics.REPORTS)
 
         # RPC network init
@@ -128,11 +126,19 @@ class SimpleAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin):
                 minimize_polling=False)
         while self.run_daemon_loop:
             start = time.time()
-            self.loop_count_and_wait(start)
             if self.fullsync:
                 LOG.info(_LI("Agent out of sync with plugin!"))
                 self.fullsync = False
                 polling_manager.force_polling()
+            if self._agent_has_updates(polling_manager):
+                print "has updates"
+                LOG.debug("Agent rpc_loop - update")
+            self.loop_count_and_wait(start)
+
+
+    def _agent_has_updates(self, polling_manager):
+        print self.sg_agent.firewall_refresh_needed()
+        return (self.sg_agent.firewall_refresh_needed())                
 
     def loop_count_and_wait(self, start_time):
         # sleep till end of polling interval
@@ -189,7 +195,7 @@ def main():
         sys.exit(1)
 
     try:
-        agent = SimpleAgent(**agent_config)
+        agent = DVSAgent(**agent_config)
     except RuntimeError as e:
         LOG.error(_LE("%s Agent terminated!"), e)
         sys.exit(1)
