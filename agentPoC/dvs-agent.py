@@ -12,16 +12,17 @@ from neutron.common import config as common_config
 from neutron.i18n import _LE, _LI, _LW
 from neutron.agent import securitygroups_rpc as sg_rpc
 from neutron.agent.linux import ip_lib
-from neutron.agent.common import config as agent_conf
+#from neutron.agent.common import config as agent_conf
 from neutron.common import constants as q_const
 from neutron.common import topics
 from neutron.agent import rpc as agent_rpc
 from neutron.agent.common import polling
-from neutron.openstack.common import loopingcall
+#from neutron.openstack.common import loopingcall
+from oslo_service import loopingcall
 from neutron import context
 
 LOG = logging.getLogger(__name__)
-cfg.CONF.import_group('AGENT', 'neutron.plugins.dvs.agent.vmware_conf')
+cfg.CONF.import_group('AGENT', 'neutron.cmd.eventlet.plugins.vmware_conf')
 
 class DVSPluginApi(agent_rpc.PluginApi):
     pass
@@ -183,7 +184,7 @@ def create_agent_config_map(config):
 def main():
 
     cfg.CONF.register_opts(ip_lib.OPTS)
-    agent_conf.register_root_helper(cfg.CONF)
+    #agent_conf.register_root_helper(cfg.CONF)
     common_config.init(sys.argv[1:])
     common_config.setup_logging()
     utils.log_opt_values(LOG)
