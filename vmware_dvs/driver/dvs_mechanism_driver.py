@@ -25,7 +25,7 @@ from neutron.plugins.ml2 import driver_api
 from neutron.plugins.ml2.drivers import mech_agent
 from oslo_log import log
 
-from vmware_dvs.utils import compute_util
+from vmware_dvs.utils import db
 from vmware_dvs.common import config
 from vmware_dvs.common import exceptions
 from vmware_dvs.common import constants as dvs_const
@@ -40,18 +40,20 @@ def port_belongs_to_vmware(func):
     def _port_belongs_to_vmware(self, context):
         port = context.current
         try:
-            try:
-                host = port['binding:host_id']
-            except KeyError:
-                raise exceptions.HypervisorNotFound
+            if port['binding:vif_type'] == 'dvs':
+                return func(self, context)
+            elif port['binding:vif_type'] == 'unbound':
+                try:
+                    host = port['binding:host_id']
+                except KeyError:
+                    raise exceptions.HypervisorNotFound
+                agent = db.get_agent_by_host(host)
 
-            hypervisor = compute_util.get_hypervisors_by_host(
-                CONF, host)
-
-            # value for field hypervisor_type collected from VMWare itself,
-            # need to make research, about all possible and suitable values
-            if hypervisor.hypervisor_type != dvs_const.VMWARE_HYPERVISOR_TYPE:
-                raise exceptions.HypervisorNotFound
+                if not agent:
+                    LOG.error('Port not belongs to vmware')
+                    raise exceptions.HypervisorNotFound
+            else:
+                return False
         except exceptions.ResourceNotFound:
             return False
         return func(self, context)
