@@ -86,6 +86,11 @@ class DVSAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
         self.quitting_rpc_timeout = quitting_rpc_timeout
         self.network_map = dvs_util.create_network_map_from_config(
             cfg.CONF.ML2_VMWARE, pg_cache=True)
+        uplink_map = dvs_util.create_uplink_map_from_config(
+            cfg.CONF.ML2_VMWARE, self.network_map)
+        for phys, dvs in self.network_map.iteritems():
+            if phys in uplink_map:
+                dvs.load_uplinks(phys, uplink_map[phys])
         self.updated_ports = set()
         self.deleted_ports = set()
         self.known_ports = set()
@@ -391,7 +396,8 @@ def create_agent_config_map(config):
     :returns: a map of agent configuration parameters
     """
     try:
-        bridge_mappings = utils.parse_mappings(config.ML2_VMWARE.network_maps)
+        bridge_mappings = utils.parse_mappings(config.ML2_VMWARE.network_maps,
+            unique_values=False)
     except ValueError as e:
         raise ValueError(_("Parsing network_maps failed: %s.") % e)
 

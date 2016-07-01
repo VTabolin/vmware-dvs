@@ -29,7 +29,7 @@ CONF = config.CONF
 
 fake_network = {'id': '34e33a31-516a-439f-a186-96ac85155a8c',
                 'name': '_fake_network_',
-                'admin_state_up': True}
+                'admin_state_up': True, 'provider:physical_network': 'net1'}
 fake_segment = {'segmentation_id': '102'}
 fake_port = {
     'id': '_dummy_port_id_',
